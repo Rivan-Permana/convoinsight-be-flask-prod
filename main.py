@@ -78,7 +78,7 @@ fernet = Fernet(FERNET_KEY.encode()) if FERNET_KEY else None
 
 CORS_ORIGINS = os.getenv(
     "CORS_ORIGINS",
-    "http://127.0.0.1:5500,http://localhost:5500,http://localhost:5173,http://127.0.0.1:5173,https://convoinsight.vercel.app,https://convo-insight.vercel.app",
+    "http://127.0.0.1:5500,http://localhost:5500,http://localhost:5173,http://127.0.0.1:5173,https://convo-insight.vercel.app",
 ).split(",")
 
 DATASETS_ROOT = os.getenv("DATASETS_ROOT", os.path.abspath("./datasets"))
@@ -116,53 +116,6 @@ if SUPABASE_URL and SUPABASE_KEY:
 # --- Init Flask ---
 app = Flask(__name__)
 CORS(app, origins=[o.strip() for o in CORS_ORIGINS if o.strip()], supports_credentials=True)
-
-# ===== CORS HARDENING (Cloud Run + preflight) =====
-# Ensures Access-Control-Allow-Origin headers are present even on errors and for OPTIONS preflights.
-import fnmatch
-
-_ALLOWED_ORIGINS = [o.strip().rstrip("/") for o in CORS_ORIGINS if o.strip()]
-
-def _origin_allowed(origin: Optional[str]) -> bool:
-    if not origin:
-        return False
-    ori = origin.strip().rstrip("/")
-    for pat in _ALLOWED_ORIGINS:
-        if pat == "*":
-            return True
-        if "*" in pat or "?" in pat:
-            if fnmatch.fnmatch(ori, pat.rstrip("/")):
-                return True
-        if ori == pat:
-            return True
-    return False
-
-def _add_cors_headers(resp):
-    origin = request.headers.get("Origin")
-    if _origin_allowed(origin):
-        # Reflect the requesting Origin when allowed (required for credentials)
-        resp.headers["Access-Control-Allow-Origin"] = origin
-        resp.headers["Vary"] = "Origin"
-        resp.headers["Access-Control-Allow-Credentials"] = "true"
-        resp.headers["Access-Control-Allow-Methods"] = "GET,POST,PUT,PATCH,DELETE,OPTIONS"
-        # Allow common headers; extend if FE needs more
-        resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Requested-With"
-        # Optional: improve perf for repeated preflights
-        resp.headers["Access-Control-Max-Age"] = "86400"
-    return resp
-
-@app.before_request
-def _handle_preflight():
-    # Short-circuit CORS preflight requests with proper headers
-    if request.method == "OPTIONS":
-        resp = app.make_response(("", 204))
-        return _add_cors_headers(resp)
-
-@app.after_request
-def _ensure_cors(resp):
-    # Add CORS headers to all responses (including errors)
-    return _add_cors_headers(resp)
-# ===== End CORS hardening =====
 
 # --- Init GCP clients ---
 _storage_client = storage.Client(project=GCP_PROJECT_ID) if GCP_PROJECT_ID else storage.Client()
@@ -360,62 +313,16 @@ def _get_user_provider_token(user_id: str, provider: str) -> Optional[str]:
     except Exception:
         return None
 
-def _get_active_provider_config(user_id: str) -> Optional[dict]:
-    """
-    Retrieve the active provider configuration for a user from Firestore.
-    Returns dict with 'provider' and 'selectedModel' or None if not found.
-    Falls back to first model in models array if selectedModel is not set.
-    """
-    try:
-        if not user_id:
-            return None
-
-        docs = (
-            _firestore_client.collection(FIRESTORE_COLLECTION_PROVIDERS)
-            .where("user_id", "==", user_id)
-            .where("is_active", "==", True)
-            .limit(1)
-            .stream()
-        )
-
-        for doc in docs:
-            data = doc.to_dict() or {}
-            provider = data.get("provider")
-            selected_model = data.get("selectedModel")
-            models = data.get("models", [])
-
-            if provider:
-                # If no selectedModel, use first model from models array
-                if not selected_model and models and len(models) > 0:
-                    selected_model = models[0]
-
-                return {
-                    "provider": provider,
-                    "selectedModel": selected_model
-                }
-
-        return None
-    except Exception:
-        return None
-
 def _resolve_llm_credentials(body: dict) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """
     Resolve model id + API key, tanpa fallback env.
     Priority: apiKey dari body (decrypt jika perlu) → Firestore (userId+provider) → None.
-    If no provider/model provided, attempts to load from user's active provider config.
     Returns: (chosen_model_id, chosen_api_key, provider_in)
     """
     provider_in = (body.get("provider") or "").strip() or None
     model_in = (body.get("model") or "").strip() or None
     api_key_in = (body.get("apiKey") or "").strip() or None
     user_id_in = (body.get("userId") or "").strip() or None
-
-    # If no provider/model specified, try to get from user's active provider config
-    if not provider_in and not model_in and user_id_in:
-        active_config = _get_active_provider_config(user_id_in)
-        if active_config:
-            provider_in = active_config.get("provider")
-            model_in = active_config.get("selectedModel")
 
     chosen_model_id = _compose_model_id(provider_in, model_in)
 
@@ -1367,24 +1274,6 @@ def serve_chart(relpath):
 # =========================
 # Provider key management
 # =========================
-def _plausible_api_key(api_key: str, *, min_len: int = 20, max_len: int = 512) -> bool:
-    """Generic, non-network validation to reject obviously bogus inputs."""
-    if not isinstance(api_key, str):
-        return False
-    s = api_key.strip()
-    if len(s) < min_len or len(s) > max_len:
-        return False
-    if any(ch.isspace() for ch in s):
-        return False
-    if len(set(s)) < 6:
-        return False
-    low = s.lower()
-    if low in {"x", "test", "apikey", "api_key", "your_api_key", "your-key", "key"}:
-        return False
-    if not re.fullmatch(r"[A-Za-z0-9_\-\.=:/\+]+", s):
-        return False
-    return True
-
 @app.route("/validate-key", methods=["POST"])
 def validate_key():
     """
@@ -1398,11 +1287,6 @@ def validate_key():
 
         if not provider or not api_key or not user_id:
             return jsonify({"valid": False, "error": "Missing provider, apiKey, or userId"}), 400
-
-        if not _plausible_api_key(api_key):
-            return jsonify(
-                {"valid": False, "error": "API key format looks invalid (too short/whitespace/placeholder/invalid chars)."}
-            ), 400
 
         valid_models = _valid_models()
         provider_models = sorted(
@@ -1510,9 +1394,6 @@ def update_provider_key():
 
         if not user_id or not provider or not api_key:
             return jsonify({"updated": False, "error": "Missing fields"}), 400
-
-        if not _plausible_api_key(api_key):
-            return jsonify({"updated": False, "error": "API key format looks invalid (too short/whitespace/placeholder/invalid chars)."}), 400
 
         _require_fernet()
         encrypted_key = fernet.encrypt(api_key.encode()).decode()
