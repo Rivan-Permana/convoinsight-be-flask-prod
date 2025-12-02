@@ -1321,7 +1321,7 @@ def serve_chart(relpath):
 # =========================
 # Provider key management
 # =========================
-def _plausible_api_key(api_key: str, *, min_len: int = 20, max_len: 512) -> bool:
+def _plausible_api_key(api_key: str, *, min_len: int = 20, max_len: int = 512) -> bool:
     """Generic, non-network validation to reject obviously bogus inputs."""
     if not isinstance(api_key, str):
         return False
