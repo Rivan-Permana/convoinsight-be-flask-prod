@@ -364,6 +364,7 @@ def _get_active_provider_config(user_id: str) -> Optional[dict]:
     """
     Retrieve the active provider configuration for a user from Firestore.
     Returns dict with 'provider' and 'selectedModel' or None if not found.
+    Falls back to first model in models array if selectedModel is not set.
     """
     try:
         if not user_id:
@@ -381,8 +382,13 @@ def _get_active_provider_config(user_id: str) -> Optional[dict]:
             data = doc.to_dict() or {}
             provider = data.get("provider")
             selected_model = data.get("selectedModel")
+            models = data.get("models", [])
 
             if provider:
+                # If no selectedModel, use first model from models array
+                if not selected_model and models and len(models) > 0:
+                    selected_model = models[0]
+
                 return {
                     "provider": provider,
                     "selectedModel": selected_model
