@@ -183,15 +183,45 @@ def _sorted_providers() -> List[str]:
     except Exception:
         return []
 
-def _valid_models() -> List[str]:
-    """Return model id list from litellm. Fallback to built-in constant if needed."""
+def _valid_models(provider: Optional[str] = None) -> List[str]:
+    """
+    Return model id list from litellm dynamically.
+    If provider is specified, temporarily sets {PROVIDER}_API_KEY env var to fetch models.
+    This mimics the Colab approach: os.environ = {f'{provider}_API_KEY': 'temporary_key'}
+    """
+    old_env_value = None
+    env_key = None
+
     try:
-        return get_valid_models()
-    except Exception:
+        # If provider specified, set temporary API key to enable model fetching
+        if provider:
+            env_key = f"{provider.upper()}_API_KEY"
+            old_env_value = os.environ.get(env_key)
+            os.environ[env_key] = "temporary_validation_key"
+            print(f"[_valid_models] Set temporary {env_key} for dynamic model fetching")
+
+        models = get_valid_models()
+        print(f"[_valid_models] get_valid_models() returned {len(models)} models")
+        return models
+
+    except Exception as e:
+        print(f"[_valid_models] get_valid_models() failed: {e}")
         try:
-            return list(LITELLM_MODEL_LIST)
-        except Exception:
+            models = list(LITELLM_MODEL_LIST)
+            print(f"[_valid_models] Using LITELLM_MODEL_LIST fallback: {len(models)} models")
+            return models
+        except Exception as e2:
+            print(f"[_valid_models] LITELLM_MODEL_LIST fallback also failed: {e2}")
             return []
+
+    finally:
+        # Restore original environment
+        if env_key:
+            if old_env_value is not None:
+                os.environ[env_key] = old_env_value
+            else:
+                os.environ.pop(env_key, None)
+            print(f"[_valid_models] Restored environment for {env_key}")
 
 def _group_models_by_prefix(models: Optional[List[str]] = None) -> Dict[str, List[str]]:
     """Group models by their first segment (prefix) without hardcoding provider names."""
@@ -215,6 +245,7 @@ def _group_models_by_prefix(models: Optional[List[str]] = None) -> Dict[str, Lis
 def _compose_model_id(provider: Optional[str], model: Optional[str]) -> str:
     """
     Compose a litellm model id dynamically WITHOUT hardcoding provider names.
+    Uses provider-specific model fetching when provider is specified.
     """
     model = (model or "").strip()
     provider = (provider or "").strip()
@@ -222,7 +253,8 @@ def _compose_model_id(provider: Optional[str], model: Optional[str]) -> str:
     if model and "/" in model:
         return model
 
-    models = _valid_models()
+    # Use provider-specific model fetching if provider is specified
+    models = _valid_models(provider=provider if provider else None)
     low_models = [(m, m.lower()) for m in models]
 
     if model and provider:
@@ -1333,14 +1365,24 @@ def validate_key():
         if not provider or not api_key or not user_id:
             return jsonify({"valid": False, "error": "Missing provider, apiKey, or userId"}), 400
 
-        valid_models = _valid_models()
+        # Get models dynamically by setting temporary env var (Colab approach)
+        print(f"[validate-key] Fetching models for provider '{provider}' dynamically")
+        valid_models = _valid_models(provider=provider)
+        print(f"[validate-key] Total models from LiteLLM: {len(valid_models)}")
+
+        # Filter models for the specified provider
         provider_models = sorted([
             m for m in valid_models
             if m.lower().startswith(provider.lower() + "/") or m.lower().startswith(provider.lower() + ".")
         ])
 
+        print(f"[validate-key] Models found for provider '{provider}': {len(provider_models)}")
+
         if not provider_models:
-            return jsonify({"valid": False, "error": f"No models found for provider '{provider}'"}), 400
+            return jsonify({
+                "valid": False,
+                "error": f"No models found for provider '{provider}'. Total models available: {len(valid_models)}"
+            }), 400
 
         _require_fernet()
         encrypted_key = fernet.encrypt(api_key.encode()).decode()
@@ -1357,6 +1399,8 @@ def validate_key():
         })
     except Exception as e:
         print("Validate key error:", e)
+        import traceback
+        traceback.print_exc()
         return jsonify({"valid": False, "error": str(e)}), 500
 
 @app.route("/get-provider-keys", methods=["GET"])
@@ -1459,7 +1503,7 @@ def update_provider_key():
     try:
         data = request.get_json()
         user_id = (data.get("userId") or "").strip()
-        provider = (data.get("provider") or "").strip()
+        provider = (data.get("provider") or "").strip().upper()
         api_key = (data.get("apiKey") or "").strip()
 
         if not user_id or not provider or not api_key:
@@ -1467,7 +1511,10 @@ def update_provider_key():
 
         _require_fernet()
         encrypted_key = fernet.encrypt(api_key.encode()).decode()
-        valid_models = _valid_models()
+
+        # Get models dynamically by setting temporary env var
+        print(f"[update-provider-key] Fetching models for provider '{provider}' dynamically")
+        valid_models = _valid_models(provider=provider)
         provider_models = sorted(
             [m for m in valid_models if m.lower().startswith(provider.lower() + "/")
              or m.lower().startswith(provider.lower() + ".")]
@@ -1488,6 +1535,9 @@ def update_provider_key():
         return jsonify({"updated": True, "models": provider_models})
 
     except Exception as e:
+        print(f"[update-provider-key] Error: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({"updated": False, "error": str(e)}), 500
 
 @app.route("/delete-provider-key", methods=["DELETE"])
