@@ -313,16 +313,64 @@ def _get_user_provider_token(user_id: str, provider: str) -> Optional[str]:
     except Exception:
         return None
 
+def _get_active_provider_config(user_id: str) -> Optional[dict]:
+    """
+    Retrieve the active provider configuration for a user from Firestore.
+    Returns dict with 'provider', 'selectedModel', and 'models' or None if not found.
+    Falls back to first model in models array if selectedModel is not set.
+    """
+    try:
+        if not user_id:
+            return None
+
+        docs = (
+            _firestore_client.collection(FIRESTORE_COLLECTION_PROVIDERS)
+            .where("user_id", "==", user_id)
+            .where("is_active", "==", True)
+            .limit(1)
+            .stream()
+        )
+
+        for doc in docs:
+            data = doc.to_dict() or {}
+            provider = data.get("provider")
+            selected_model = data.get("selectedModel")
+            models = data.get("models", [])
+
+            if provider:
+                # If no selectedModel, use first model from models array
+                if not selected_model and models and len(models) > 0:
+                    selected_model = models[0]
+
+                return {
+                    "provider": provider,
+                    "selectedModel": selected_model,
+                    "models": models
+                }
+
+        return None
+    except Exception as e:
+        print(f"Error in _get_active_provider_config: {e}")
+        return None
+
 def _resolve_llm_credentials(body: dict) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """
     Resolve model id + API key, tanpa fallback env.
     Priority: apiKey dari body (decrypt jika perlu) → Firestore (userId+provider) → None.
+    If no provider/model provided, attempts to load from user's active provider config.
     Returns: (chosen_model_id, chosen_api_key, provider_in)
     """
     provider_in = (body.get("provider") or "").strip() or None
     model_in = (body.get("model") or "").strip() or None
     api_key_in = (body.get("apiKey") or "").strip() or None
     user_id_in = (body.get("userId") or "").strip() or None
+
+    # If no provider/model specified, try to get from user's active provider config
+    if not provider_in and not model_in and user_id_in:
+        active_config = _get_active_provider_config(user_id_in)
+        if active_config:
+            provider_in = active_config.get("provider")
+            model_in = active_config.get("selectedModel")
 
     chosen_model_id = _compose_model_id(provider_in, model_in)
 
