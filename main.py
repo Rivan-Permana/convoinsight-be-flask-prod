@@ -1276,12 +1276,9 @@ def serve_chart(relpath):
 # =========================
 @app.route("/validate-key", methods=["POST"])
 def validate_key():
-    """
-    Validate & save API key for a given provider.
-    """
     try:
         data = request.get_json()
-        provider = (data.get("provider") or "").strip()
+        provider = (data.get("provider") or "").strip().upper()
         api_key = (data.get("apiKey") or "").strip()
         user_id = (data.get("userId") or "").strip()
 
@@ -1289,18 +1286,29 @@ def validate_key():
             return jsonify({"valid": False, "error": "Missing provider, apiKey, or userId"}), 400
 
         valid_models = _valid_models()
-        provider_models = sorted(
-            [m for m in valid_models if m.lower().startswith(provider.lower() + "/")
-             or m.lower().startswith(provider.lower() + ".")]
-        )
+        provider_models = sorted([
+            m for m in valid_models
+            if m.lower().startswith(provider.lower() + "/") or m.lower().startswith(provider.lower() + ".")
+        ])
+
+        if not provider_models:
+            return jsonify({"valid": False, "error": f"No models found for provider '{provider}'"}), 400
 
         _require_fernet()
         encrypted_key = fernet.encrypt(api_key.encode()).decode()
-        save_provider_key(user_id, provider, encrypted_key, provider_models)
 
-        return jsonify({"valid": True, "provider": provider, "models": provider_models, "token": encrypted_key})
+        success = save_provider_key(user_id, provider, encrypted_key, provider_models)
+        if not success:
+            return jsonify({"valid": False, "error": "Failed to save key"}), 500
 
+        return jsonify({
+            "valid": True,
+            "provider": provider,
+            "models": provider_models,
+            "token": encrypted_key
+        })
     except Exception as e:
+        print("Validate key error:", e)
         return jsonify({"valid": False, "error": str(e)}), 500
 
 @app.route("/get-provider-keys", methods=["GET"])
@@ -1315,18 +1323,27 @@ def get_provider_keys():
             .where("user_id", "==", user_id)
             .stream()
         )
-
         items = []
         for doc in docs:
-            d = doc.to_dict()
+            d = doc.to_dict() or {}
+            raw_models = d.get("models", [])
+            # Pastikan models selalu list[string], bukan null/malformed
+            if not isinstance(raw_models, list):
+                raw_models = []
+            else:
+                raw_models = [str(m) for m in raw_models if isinstance(m, str)]
+
             raw_updated = d.get("updated_at")
-            updated_at = raw_updated.isoformat() if hasattr(raw_updated, "isoformat") else (str(raw_updated) if raw_updated else None)
+            updated_at = (
+                raw_updated.isoformat() if hasattr(raw_updated, "isoformat")
+                else (str(raw_updated) if raw_updated else None)
+            )
 
             items.append({
                 "id": doc.id,
-                "provider": d.get("provider"),
-                "models": d.get("models", []),
-                "is_active": d.get("is_active", False),
+                "provider": d.get("provider", "").upper(),
+                "models": raw_models,  # Selalu array string
+                "is_active": bool(d.get("is_active", False)),
                 "updated_at": updated_at,
                 "selectedModel": d.get("selectedModel"),
                 "verbosity": d.get("verbosity"),
@@ -1334,8 +1351,13 @@ def get_provider_keys():
                 "seed": d.get("seed"),
             })
 
-        return jsonify({"items": items, "count": len(items), "summary": f"{len(items)} provider keys found"})
+        return jsonify({
+            "items": items,
+            "count": len(items),
+            "summary": f"{len(items)} provider keys found"
+        })
     except Exception as e:
+        print("Error in /get-provider-keys:", e)
         return jsonify({"error": str(e)}), 500
 
 @app.route("/set-active-config", methods=["POST"])
