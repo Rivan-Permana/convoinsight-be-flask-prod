@@ -183,12 +183,27 @@ def _sorted_providers() -> List[str]:
     except Exception:
         return []
 
-def _valid_models() -> List[str]:
-    """Return model id list from litellm. Fallback to built-in constant if needed."""
+def _valid_models(provider: Optional[str] = None) -> List[str]:
+    """
+    Return model id list from litellm dynamically.
+    If provider is specified, temporarily sets {PROVIDER}_API_KEY env var to fetch models.
+    This mimics the Colab approach: os.environ = {f'{provider}_API_KEY': 'temporary_key'}
+    """
+    old_env_value = None
+    env_key = None
+
     try:
+        # If provider specified, set temporary API key to enable model fetching
+        if provider:
+            env_key = f"{provider.upper()}_API_KEY"
+            old_env_value = os.environ.get(env_key)
+            os.environ[env_key] = "temporary_validation_key"
+            print(f"[_valid_models] Set temporary {env_key} for dynamic model fetching")
+
         models = get_valid_models()
         print(f"[_valid_models] get_valid_models() returned {len(models)} models")
         return models
+
     except Exception as e:
         print(f"[_valid_models] get_valid_models() failed: {e}")
         try:
@@ -198,6 +213,15 @@ def _valid_models() -> List[str]:
         except Exception as e2:
             print(f"[_valid_models] LITELLM_MODEL_LIST fallback also failed: {e2}")
             return []
+
+    finally:
+        # Restore original environment
+        if env_key:
+            if old_env_value is not None:
+                os.environ[env_key] = old_env_value
+            else:
+                os.environ.pop(env_key, None)
+            print(f"[_valid_models] Restored environment for {env_key}")
 
 def _group_models_by_prefix(models: Optional[List[str]] = None) -> Dict[str, List[str]]:
     """Group models by their first segment (prefix) without hardcoding provider names."""
@@ -221,6 +245,7 @@ def _group_models_by_prefix(models: Optional[List[str]] = None) -> Dict[str, Lis
 def _compose_model_id(provider: Optional[str], model: Optional[str]) -> str:
     """
     Compose a litellm model id dynamically WITHOUT hardcoding provider names.
+    Uses provider-specific model fetching when provider is specified.
     """
     model = (model or "").strip()
     provider = (provider or "").strip()
@@ -228,7 +253,8 @@ def _compose_model_id(provider: Optional[str], model: Optional[str]) -> str:
     if model and "/" in model:
         return model
 
-    models = _valid_models()
+    # Use provider-specific model fetching if provider is specified
+    models = _valid_models(provider=provider if provider else None)
     low_models = [(m, m.lower()) for m in models]
 
     if model and provider:
@@ -1339,8 +1365,9 @@ def validate_key():
         if not provider or not api_key or not user_id:
             return jsonify({"valid": False, "error": "Missing provider, apiKey, or userId"}), 400
 
-        # Get all valid models from LiteLLM
-        valid_models = _valid_models()
+        # Get models dynamically by setting temporary env var (Colab approach)
+        print(f"[validate-key] Fetching models for provider '{provider}' dynamically")
+        valid_models = _valid_models(provider=provider)
         print(f"[validate-key] Total models from LiteLLM: {len(valid_models)}")
 
         # Filter models for the specified provider
@@ -1351,44 +1378,11 @@ def validate_key():
 
         print(f"[validate-key] Models found for provider '{provider}': {len(provider_models)}")
 
-        # Fallback: If no models found but valid_models is empty, LiteLLM might not be initialized
         if not provider_models:
-            if len(valid_models) == 0:
-                print(f"[validate-key] WARNING: LiteLLM returned 0 models. Using hardcoded fallback.")
-                # Hardcoded fallback for common providers
-                fallback_models = {
-                    "GEMINI": [
-                        "gemini/gemini-2.0-flash-exp",
-                        "gemini/gemini-1.5-pro",
-                        "gemini/gemini-1.5-flash",
-                        "gemini/gemini-1.5-flash-001",
-                        "gemini/gemini-1.5-flash-002",
-                        "gemini/gemini-1.5-flash-8b",
-                        "gemini/gemini-1.5-flash-8b-001",
-                        "gemini/gemini-1.5-pro-001",
-                        "gemini/gemini-1.5-pro-002",
-                    ],
-                    "OPENAI": [
-                        "openai/gpt-4o",
-                        "openai/gpt-4o-mini",
-                        "openai/gpt-4-turbo",
-                        "openai/gpt-3.5-turbo",
-                    ],
-                    "ANTHROPIC": [
-                        "anthropic/claude-3-5-sonnet-20241022",
-                        "anthropic/claude-3-opus-20240229",
-                        "anthropic/claude-3-sonnet-20240229",
-                    ]
-                }
-                provider_models = fallback_models.get(provider, [])
-                if provider_models:
-                    print(f"[validate-key] Using {len(provider_models)} hardcoded models for {provider}")
-
-            if not provider_models:
-                return jsonify({
-                    "valid": False,
-                    "error": f"No models found for provider '{provider}'. Total models available: {len(valid_models)}"
-                }), 400
+            return jsonify({
+                "valid": False,
+                "error": f"No models found for provider '{provider}'. Total models available: {len(valid_models)}"
+            }), 400
 
         _require_fernet()
         encrypted_key = fernet.encrypt(api_key.encode()).decode()
@@ -1517,40 +1511,14 @@ def update_provider_key():
 
         _require_fernet()
         encrypted_key = fernet.encrypt(api_key.encode()).decode()
-        valid_models = _valid_models()
+
+        # Get models dynamically by setting temporary env var
+        print(f"[update-provider-key] Fetching models for provider '{provider}' dynamically")
+        valid_models = _valid_models(provider=provider)
         provider_models = sorted(
             [m for m in valid_models if m.lower().startswith(provider.lower() + "/")
              or m.lower().startswith(provider.lower() + ".")]
         )
-
-        # Fallback to hardcoded models if LiteLLM returns empty list
-        if not provider_models and len(valid_models) == 0:
-            print(f"[update-provider-key] WARNING: Using hardcoded fallback for {provider}")
-            fallback_models = {
-                "GEMINI": [
-                    "gemini/gemini-2.0-flash-exp",
-                    "gemini/gemini-1.5-pro",
-                    "gemini/gemini-1.5-flash",
-                    "gemini/gemini-1.5-flash-001",
-                    "gemini/gemini-1.5-flash-002",
-                    "gemini/gemini-1.5-flash-8b",
-                    "gemini/gemini-1.5-flash-8b-001",
-                    "gemini/gemini-1.5-pro-001",
-                    "gemini/gemini-1.5-pro-002",
-                ],
-                "OPENAI": [
-                    "openai/gpt-4o",
-                    "openai/gpt-4o-mini",
-                    "openai/gpt-4-turbo",
-                    "openai/gpt-3.5-turbo",
-                ],
-                "ANTHROPIC": [
-                    "anthropic/claude-3-5-sonnet-20241022",
-                    "anthropic/claude-3-opus-20240229",
-                    "anthropic/claude-3-sonnet-20240229",
-                ]
-            }
-            provider_models = fallback_models.get(provider, [])
 
         doc_ref = _firestore_client.collection(FIRESTORE_COLLECTION_PROVIDERS).document(f"{user_id}_{provider}")
         doc_ref.set(
