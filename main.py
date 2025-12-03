@@ -186,11 +186,17 @@ def _sorted_providers() -> List[str]:
 def _valid_models() -> List[str]:
     """Return model id list from litellm. Fallback to built-in constant if needed."""
     try:
-        return get_valid_models()
-    except Exception:
+        models = get_valid_models()
+        print(f"[_valid_models] get_valid_models() returned {len(models)} models")
+        return models
+    except Exception as e:
+        print(f"[_valid_models] get_valid_models() failed: {e}")
         try:
-            return list(LITELLM_MODEL_LIST)
-        except Exception:
+            models = list(LITELLM_MODEL_LIST)
+            print(f"[_valid_models] Using LITELLM_MODEL_LIST fallback: {len(models)} models")
+            return models
+        except Exception as e2:
+            print(f"[_valid_models] LITELLM_MODEL_LIST fallback also failed: {e2}")
             return []
 
 def _group_models_by_prefix(models: Optional[List[str]] = None) -> Dict[str, List[str]]:
@@ -1333,14 +1339,56 @@ def validate_key():
         if not provider or not api_key or not user_id:
             return jsonify({"valid": False, "error": "Missing provider, apiKey, or userId"}), 400
 
+        # Get all valid models from LiteLLM
         valid_models = _valid_models()
+        print(f"[validate-key] Total models from LiteLLM: {len(valid_models)}")
+
+        # Filter models for the specified provider
         provider_models = sorted([
             m for m in valid_models
             if m.lower().startswith(provider.lower() + "/") or m.lower().startswith(provider.lower() + ".")
         ])
 
+        print(f"[validate-key] Models found for provider '{provider}': {len(provider_models)}")
+
+        # Fallback: If no models found but valid_models is empty, LiteLLM might not be initialized
         if not provider_models:
-            return jsonify({"valid": False, "error": f"No models found for provider '{provider}'"}), 400
+            if len(valid_models) == 0:
+                print(f"[validate-key] WARNING: LiteLLM returned 0 models. Using hardcoded fallback.")
+                # Hardcoded fallback for common providers
+                fallback_models = {
+                    "GEMINI": [
+                        "gemini/gemini-2.0-flash-exp",
+                        "gemini/gemini-1.5-pro",
+                        "gemini/gemini-1.5-flash",
+                        "gemini/gemini-1.5-flash-001",
+                        "gemini/gemini-1.5-flash-002",
+                        "gemini/gemini-1.5-flash-8b",
+                        "gemini/gemini-1.5-flash-8b-001",
+                        "gemini/gemini-1.5-pro-001",
+                        "gemini/gemini-1.5-pro-002",
+                    ],
+                    "OPENAI": [
+                        "openai/gpt-4o",
+                        "openai/gpt-4o-mini",
+                        "openai/gpt-4-turbo",
+                        "openai/gpt-3.5-turbo",
+                    ],
+                    "ANTHROPIC": [
+                        "anthropic/claude-3-5-sonnet-20241022",
+                        "anthropic/claude-3-opus-20240229",
+                        "anthropic/claude-3-sonnet-20240229",
+                    ]
+                }
+                provider_models = fallback_models.get(provider, [])
+                if provider_models:
+                    print(f"[validate-key] Using {len(provider_models)} hardcoded models for {provider}")
+
+            if not provider_models:
+                return jsonify({
+                    "valid": False,
+                    "error": f"No models found for provider '{provider}'. Total models available: {len(valid_models)}"
+                }), 400
 
         _require_fernet()
         encrypted_key = fernet.encrypt(api_key.encode()).decode()
@@ -1357,6 +1405,8 @@ def validate_key():
         })
     except Exception as e:
         print("Validate key error:", e)
+        import traceback
+        traceback.print_exc()
         return jsonify({"valid": False, "error": str(e)}), 500
 
 @app.route("/get-provider-keys", methods=["GET"])
@@ -1459,7 +1509,7 @@ def update_provider_key():
     try:
         data = request.get_json()
         user_id = (data.get("userId") or "").strip()
-        provider = (data.get("provider") or "").strip()
+        provider = (data.get("provider") or "").strip().upper()
         api_key = (data.get("apiKey") or "").strip()
 
         if not user_id or not provider or not api_key:
@@ -1472,6 +1522,35 @@ def update_provider_key():
             [m for m in valid_models if m.lower().startswith(provider.lower() + "/")
              or m.lower().startswith(provider.lower() + ".")]
         )
+
+        # Fallback to hardcoded models if LiteLLM returns empty list
+        if not provider_models and len(valid_models) == 0:
+            print(f"[update-provider-key] WARNING: Using hardcoded fallback for {provider}")
+            fallback_models = {
+                "GEMINI": [
+                    "gemini/gemini-2.0-flash-exp",
+                    "gemini/gemini-1.5-pro",
+                    "gemini/gemini-1.5-flash",
+                    "gemini/gemini-1.5-flash-001",
+                    "gemini/gemini-1.5-flash-002",
+                    "gemini/gemini-1.5-flash-8b",
+                    "gemini/gemini-1.5-flash-8b-001",
+                    "gemini/gemini-1.5-pro-001",
+                    "gemini/gemini-1.5-pro-002",
+                ],
+                "OPENAI": [
+                    "openai/gpt-4o",
+                    "openai/gpt-4o-mini",
+                    "openai/gpt-4-turbo",
+                    "openai/gpt-3.5-turbo",
+                ],
+                "ANTHROPIC": [
+                    "anthropic/claude-3-5-sonnet-20241022",
+                    "anthropic/claude-3-opus-20240229",
+                    "anthropic/claude-3-sonnet-20240229",
+                ]
+            }
+            provider_models = fallback_models.get(provider, [])
 
         doc_ref = _firestore_client.collection(FIRESTORE_COLLECTION_PROVIDERS).document(f"{user_id}_{provider}")
         doc_ref.set(
@@ -1488,6 +1567,9 @@ def update_provider_key():
         return jsonify({"updated": True, "models": provider_models})
 
     except Exception as e:
+        print(f"[update-provider-key] Error: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({"updated": False, "error": str(e)}), 500
 
 @app.route("/delete-provider-key", methods=["DELETE"])
